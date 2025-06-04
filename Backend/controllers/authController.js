@@ -14,40 +14,32 @@ const AuthController = {
       // Validate input
       const { error, value } = registerSchema.validate(req.body);
       if (error) throw new Error(error.details[0].message);
-  
+
       const { email, password, name } = value;
-  
+
       // Check for existing user
       const existingUser = await UserModel.findByEmail(email);
       if (existingUser) throw new Error("Email already in use");
-  
-      // Create user (password hashed in model)
-      const user = await UserModel.create({ 
-        email, 
+
+      // Create user
+      const user = await UserModel.create({
+        email,
         name,
         password,
         oauth_provider: null,
-        oauth_id: null
+        oauth_id: null,
       });
-  
+
       // Generate JWT token
       const token = UserModel.generateToken({
         id: user.id,
         email: user.email,
-        role: user.role
+        role: user.role,
       });
-  
-      // Set session
-      req.session.userId = user.id;
-      req.session.authenticated = true;
-  
-      // Set cookie directly here
-      res.cookie("authToken", token, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        maxAge: 24 * 60 * 60 * 1000, // 1 day
-      });
-  
+
+      // Set auth cookie
+      this.setAuthCookie(res, token);
+
       // Respond with success
       res.status(201).json({
         success: true,
@@ -64,46 +56,40 @@ const AuthController = {
       next(error);
     }
   },
-  
 
   // ================= LOGIN =================
   async login(req, res, next) {
     try {
       const { error, value } = loginSchema.validate(req.body);
       if (error) throw new Error(error.details[0].message);
-  
+
       const { email, password } = value;
-  
+
       // Find user
       const user = await UserModel.findByEmail(email);
-      if (!user || !user.password_hash) {
-        throw new Error("Invalid email or password");
+      if (!user) throw new Error("Invalid email or password");
+
+      // Check password (skip for OAuth-only users)
+      if (user.password_hash) {
+        const isValid = await UserModel.verifyPassword(
+          password,
+          user.password_hash
+        );
+        if (!isValid) throw new Error("Invalid email or password");
+      } else {
+        throw new Error("Please login using your OAuth provider");
       }
-  
-      // Check password
-      const isValid = await UserModel.verifyPassword(password, user.password_hash);
-      if (!isValid) {
-        throw new Error("Invalid email or password");
-      }
-  
+
       // Generate token
       const token = UserModel.generateToken({
         id: user.id,
         email: user.email,
-        role: user.role
+        role: user.role,
       });
-  
-      // Set session
-      req.session.userId = user.id;
-      req.session.authenticated = true;
-  
+
       // Set auth cookie
-      res.cookie("authToken", token, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        maxAge: 24 * 60 * 60 * 1000,
-      });
-  
+      this.setAuthCookie(res, token);
+
       // Return response
       res.status(200).json({
         success: true,
@@ -114,13 +100,12 @@ const AuthController = {
           name: user.name,
           role: user.role,
           createdAt: user.created_at,
-        }
+        },
       });
     } catch (error) {
       next(error);
     }
-  }
-  ,
+  },
 
   // ================= GOOGLE OAUTH =================
   initiateGoogleAuth(req, res) {
@@ -128,6 +113,7 @@ const AuthController = {
       scope: ["profile", "email"],
       session: false,
       prompt: "select_account",
+      accessType: "offline", // Added for refresh tokens
     });
     authenticator(req, res);
   },
@@ -135,14 +121,17 @@ const AuthController = {
   async handleGoogleCallback(req, res, next) {
     passport.authenticate(
       "google",
-      { session: false, failureRedirect: "/login" },
+      {
+        session: false,
+        failureRedirect: `${process.env.CLIENT_URL}/login?error=authentication_failed`,
+      },
       async (err, user, info) => {
         try {
           if (err || !user) {
-            const errorMessage = err?.message || "Google authentication failed";
+            console.error("Google Auth Error:", err || info);
             return res.redirect(
               `${process.env.CLIENT_URL}/login?error=${encodeURIComponent(
-                errorMessage
+                err?.message || "Google authentication failed"
               )}`
             );
           }
@@ -151,20 +140,21 @@ const AuthController = {
           const token = UserModel.generateToken({
             id: user.id,
             email: user.email,
-            role: user.role
+            role: user.role,
           });
 
-          // Set cookie
+          // Set auth cookie
           this.setAuthCookie(res, token);
 
-          // Redirect to frontend with token
+          // Successful authentication
           res.redirect(
             `${process.env.CLIENT_URL}/oauth-success?token=${token}&userId=${user.id}`
           );
         } catch (error) {
+          console.error("Google Callback Error:", error);
           res.redirect(
             `${process.env.CLIENT_URL}/login?error=${encodeURIComponent(
-              error.message
+              "Authentication error. Please try again."
             )}`
           );
         }
@@ -180,11 +170,13 @@ const AuthController = {
 
       // Verify Google token
       const googleUser = await this.verifyGoogleToken(googleToken);
+      if (!googleUser) throw new Error("Invalid Google token");
 
       // Link to existing account
-      const updatedUser = await UserModel.updateOAuthInfo(req.user.id, {
-        oauth_provider: "google",
-        oauth_id: googleUser.sub,
+      const updatedUser = await UserModel.linkOAuthAccount(req.user.id, {
+        provider: "google",
+        providerId: googleUser.sub,
+        email: googleUser.email,
       });
 
       res.json({
@@ -219,6 +211,7 @@ const AuthController = {
           oauthProvider: user.oauth_provider,
           createdAt: user.created_at,
           isActive: user.is_active,
+          avatar: user.avatar,
         },
       });
     } catch (error) {
@@ -233,7 +226,7 @@ const AuthController = {
       if (error) throw new Error(error.details[0].message);
 
       const { currentPassword, newPassword } = value;
-      const user = await UserModel.findByEmail(req.user.email);
+      const user = await UserModel.findById(req.user.id);
 
       // Verify current password (skip for OAuth-only users)
       if (user.password_hash) {
@@ -242,6 +235,8 @@ const AuthController = {
           user.password_hash
         );
         if (!isMatch) throw new Error("Current password is incorrect");
+      } else {
+        throw new Error("Please set a password first");
       }
 
       // Update password
@@ -259,12 +254,23 @@ const AuthController = {
   // ================= LOGOUT =================
   async logout(req, res, next) {
     try {
-      req.session.destroy((err) => {
-        if (err) throw err;
-      });
+      // Clear session if using sessions
+      if (req.session) {
+        req.session.destroy();
+      }
+
+      // Clear cookies
       res.clearCookie("token");
-      res.clearCookie("connect.sid");
-      res.json({ success: true, message: "Logged out successfully" });
+      res.clearCookie("connect.sid", {
+        path: "/",
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+      });
+
+      res.json({
+        success: true,
+        message: "Logged out successfully",
+      });
     } catch (error) {
       next(error);
     }
@@ -276,17 +282,23 @@ const AuthController = {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       maxAge: 24 * 60 * 60 * 1000, // 1 day
-      sameSite: "strict",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+      path: "/",
     });
   },
 
   async verifyGoogleToken(token) {
-    const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
-    const ticket = await client.verifyIdToken({
-      idToken: token,
-      audience: process.env.GOOGLE_CLIENT_ID,
-    });
-    return ticket.getPayload();
+    try {
+      const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+      const ticket = await client.verifyIdToken({
+        idToken: token,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+      return ticket.getPayload();
+    } catch (error) {
+      console.error("Google Token Verification Error:", error);
+      return null;
+    }
   },
 };
 
