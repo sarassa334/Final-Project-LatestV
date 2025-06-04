@@ -10,7 +10,8 @@ const UserModel = {
     password = null, 
     oauth_provider = null, 
     oauth_id = null, 
-    avatar = null 
+    avatar = null,
+    role = 'student'
   }) {
     try {
       const password_hash = password 
@@ -27,20 +28,14 @@ const UserModel = {
           role,
           is_active
         ) VALUES ($1, $2, $3, $4, $5, $6, $7) 
-        RETURNING 
-          id, 
-          email, 
-          name, 
-          role,
-          oauth_provider,
-          created_at`,
+        RETURNING *`,
         [
           email,
           name,
           password_hash,
           oauth_provider,
           oauth_id,
-          'student', // Default role
+          role, // Default role
           true // OAuth users are immediately active
         ]
       );

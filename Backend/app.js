@@ -3,6 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import authRoutes from './routes/authRoutes.js';
+import courseRoutes from './routes/courseRoutes.js';
 import { notFound, errorHandler } from './middleware/error.js';
 import './config/db.js';
 import passport from './config/passport.js';
@@ -18,8 +19,9 @@ app.use(helmet());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Cookies and session
+// Cookies and session (should come before passport and routes)
 app.use(cookieParser());
+// Session configuration (updated)
 app.use(session({
   secret: process.env.SESSION_SECRET,
   resave: false,
@@ -28,7 +30,7 @@ app.use(session({
     secure: process.env.NODE_ENV === 'production',
     httpOnly: true,
     maxAge: 24 * 60 * 60 * 1000,
-    sameSite: 'strict',
+    sameSite: 'lax', // Changed from 'strict' for OAuth to work
   },
 }));
 
@@ -45,10 +47,12 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 // Passport initialization (after session middleware)
 app.use(passport.initialize());
-app.use(passport.session()); // If you're using sessions with passport
+app.use(passport.session());
 
 // ================= Routes =====================
+// IMPORTANT: All routes should be grouped together after all middleware
 app.use('/api/auth', authRoutes);
+app.use('/api/courses', courseRoutes); // Moved down here
 
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'OK' }));

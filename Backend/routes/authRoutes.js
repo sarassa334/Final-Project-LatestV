@@ -5,25 +5,21 @@ import { authenticate } from '../middleware/auth.js';
 
 const router = Router();
 
-// ================= LOCAL AUTHENTICATION =================
+// Local Auth
 router.post('/register', AuthController.register);
 router.post('/login', AuthController.login);
-// Add to authRoutes.js
-// router.post('/link-provider', authenticate, userController.linkProvider);
-// ================= GOOGLE OAUTH =================
-router.get('/google', AuthController.initiateGoogleAuth);
+
+// Google OAuth
+router.get('/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 router.get('/google/callback', 
   passport.authenticate('google', { 
-    session: false,
-    failureRedirect: '/login' 
+    failureRedirect: '/login',
+    session: false 
   }),
   AuthController.handleGoogleCallback
 );
 
-// ================= ACCOUNT LINKING =================
-router.post('/link/google', authenticate, AuthController.linkGoogleAccount);
-
-// ================= PROTECTED ROUTES =================
+// Account Management
 router.get('/me', authenticate, AuthController.getMe);
 router.put('/change-password', authenticate, AuthController.changePassword);
 router.post('/logout', authenticate, AuthController.logout);
